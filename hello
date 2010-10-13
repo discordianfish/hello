@@ -1,0 +1,49 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+use Mojolicious::Lite;
+
+
+get '/' => sub
+{
+    my $self = shift;
+
+    $self->render;
+} => 'index';
+
+app->start;
+
+__DATA__
+@@ index.html.ep
+<!doctype html5>
+<html>
+    <head>
+        <style type="text/css">
+            #map { width: 100%; height: 100%; }
+        </style>
+        <script type="text/javascript" src="http://maps.google.com/maps/api/js?sensor=false"> 
+        </script>
+        <script>
+            var map;
+            var position = new google.maps.LatLng(52.5093300, 13.4560725);
+
+            function update(position) {
+                position = new google.maps.LatLng(position.coords.latitude, position.coords.longitude);
+            }
+
+            function init() {
+                var opt = { zoom: 10, mapTypeId: google.maps.MapTypeId.ROADMAP };
+                map = new google.maps.Map(document.getElementById("map"), opt);
+                map.setCenter(position);
+            }
+
+
+            var watch = navigator.geolocation.watchPosition(update);
+        </script>
+    </head>
+    <body onLoad="init()">
+        <p>Welcome! What are you looking for? <input type="text" onChange="search(this)" /></p>
+        <div id="map"></div>
+    </body>
+</html>
