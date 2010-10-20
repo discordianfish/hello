@@ -3,47 +3,228 @@ use strict;
 use warnings;
 
 use Mojolicious::Lite;
+use Mojo::JSON;
+use MojoX::Session::Cookie;
 
+use Data::Dumper;
 
-get '/' => sub
+use constant API =>
 {
+    'hello' => \&_hello,
+    'say' => \&_say,
+};
+
+my %updates;
+
+# renders the html
+get '/' => sub {
     my $self = shift;
 
     $self->render;
 } => 'index';
 
+# get users, chat messages and pushes
+websocket '/socket' => sub {
+    my $self = shift;
+    app->log->debug("got websocket request!");
+    $self->receive_message(sub
+    {
+        my $self = shift;
+        my $data = shift;
+        
+        $self->send_json(_action($self, $data));
+    });
+} => 'ws';
+
+post '/update' => sub {
+    my $self = shift;
+    my $lat = $self->req->param('lat');
+    my $lng = $self->req->param('lng');
+    my $param = $self->req->param('param');
+    my $action = $self->req->param('action');
+
+    app->log->debug("ajax request: ($lat,$lng) $action: " . Dumper($param));
+    _where($lat, $lng);
+
+    if ($action)
+    {    
+        _action($action, $param) or die $!;
+    }
+
+    $self->render_json({ data => _updates() });
+} => 'update';
+
+sub _action {
+    my $action = shift;
+    my $param = shift;
+
+    app->log->debug("action: $action");
+    die "invalid api call '$action'" unless API->{$action};
+
+    return API->{$action}->($param);
+}
+
+sub id {
+    my $name = shift;
+
+    app->session->{user} = $name if $name;
+    app->session->{user} = time unless app->session->{user};
+
+    return app->session->{user};
+}
+
+
+# return:
+#  - all people
+#  - chat messages
+# TODO: only return new people / mark old as left
+# ---> left out for now, because we would ne state
+
+sub _where {
+    my ($lat,$lng) = @_;
+    my $id = id();
+    if ($lat && $lng) { $updates{$id} = { lat => $lat, lng => $lng } };
+
+    return ($updates{$id}->{lat}, $updates{$id}->{lng});
+}
+sub _updates {
+    app->log->debug(Dumper(\%updates));
+    app->log->debug("looking for updates near " , _where);
+
+    # return all updates
+    #   - in regio
+    #   - which has not yet been read by user
+    #   - which are not older then last refresh
+
+    # fo now, fake it:
+    app->log->debug(Dumper \%updates);
+    return { updates => \%updates };
+#    return {
+#        updates => {
+#            'id1' => { lat => 52.5093300, lng => 13.4560725, messages => [ [ 1234, "hello" ], [ 1235, "world" ] ] },
+#            'id2' => { lat => 52.509300, lng => 13.4560735 , messages => [ [ 1234, "hadfl" ], [ 1235, "whfgh" ] ] },
+#            'id3' => { lat => 52.5093400, lng => 13.4560785, messages => [ [ 1234, "dhgfo" ], [ 1235, "xxfdd" ] ] },
+#            'id4' => { lat => 52.5093800, lng => 13.4560525, messages => [ [ 1234, "dhgfo" ], [ 1235, "xxfdd" ] ] },
+#        }, 
+#    }
+}
+
+sub _say {
+    my $message = shift;
+    my $user = id();
+    push @{ $updates{$user} }, { message => $message, tag => where() };
+}
+
+sub _near {
+    my $cid = shift;
+    # TODO: only return people near
+
+    return keys %updates;
+}
+
+
 app->start;
 
 __DATA__
 @@ index.html.ep
+% my $url = $self->req->url->to_abs->scheme( $self->req->is_secure ? 'wss' : 'ws' )->path( '/socket' );
 <!doctype html5>
 <html>
     <head>
         <style type="text/css">
             #map { width: 100%; height: 100%; }
+            form { display: inline; position: absolute; top: 1em; }
         </style>
+        <script type="text/javascript" src="http://mattkruse.com/javascript/datadumper/datadumper.js">
+        </script>
         <script type="text/javascript" src="http://maps.google.com/maps/api/js?sensor=false"> 
         </script>
+        <script type="text/javascript" src='http://ajax.googleapis.com/ajax/libs/jquery/1.4.2/jquery.min.js'></script>
         <script>
-            var map;
-            var position = new google.maps.LatLng(52.5093300, 13.4560725);
+            var map;    // the map
+            var watch;  // the geopos change watcher
+            var ws;     // the websocket
+            var position = new Array(52.5093300, 13.4560725);
 
-            function update(position) {
-                position = new google.maps.LatLng(position.coords.latitude, position.coords.longitude);
+            function update(pos) {
+                var lat = pos.coords.latitude;
+                var lng = pos.coords.longitude;
+
+                position = new Array(lat,lng);
+            }
+            
+            function recv(message) {
+                var input = message.data; // JSON.parse(message.data);
+
+                for (var id in input.updates)
+                {
+                    var pos = input.updates[id];
+                    var ll = new google.maps.LatLng(pos.lat, pos.lng);
+
+                    var marker = new google.maps.Marker({
+                        position: ll,
+                        map: map
+                    });
+                } 
+            }
+            function chat() {
+                var msg = document.getElementById("msg").value;
+                rpc({ "action": "say", "param": { "msg": msg } });
+            }
+
+            function rpc(data)
+            {
+                // send ajax
+                var href = '<%= url_for('update') %>';
+
+                var call =
+                {
+                    "lat": position[0],
+                    "lng": position[1],
+                };
+
+                if (data)
+                {
+                    call.action = data.action;
+                    call.param = data.param;
+                }
+
+                $.post(href, call, recv);
             }
 
             function init() {
                 var opt = { zoom: 10, mapTypeId: google.maps.MapTypeId.ROADMAP };
                 map = new google.maps.Map(document.getElementById("map"), opt);
-                map.setCenter(position);
+                map.setCenter(new google.maps.LatLng(position[0], position[1]));
+
+                //ws = new WebSocket("<%= $url %>");
+
+                // first open socket, than get position
+                if (ws)
+                {
+                    ws.onopen = function()
+                    {
+                        watch = navigator.geolocation.watchPosition(update);
+                        document.getElementById("chat").onsubmit = function() { chat(); return false; }
+                        ws.onmessage = recv;
+                    };
+                } else
+                {
+                    watch = navigator.geolocation.watchPosition(update);
+                    document.getElementById("chat").onsubmit = function() { chat(); return false; }
+                    
+                    setInterval(rpc, 1000);
+                }
             }
 
-
-            var watch = navigator.geolocation.watchPosition(update);
+            var watch;
         </script>
     </head>
     <body onLoad="init()">
+<!-- later..
         <p>Welcome! What are you looking for? <input type="text" onChange="search(this)" /></p>
+-->
         <div id="map"></div>
+        <form id='chat'><input size="80" id="msg"></form>
     </body>
 </html>
